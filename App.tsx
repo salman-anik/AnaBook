@@ -200,20 +200,18 @@ function MainApp() {
       setAppState(st);
       setBooting(false);
 
-      // Background sync full 22,166 catalog if currently on starter pack
-      if (catRes.meta.source === 'starter') {
-        setSyncingCatalog(true);
-        try {
-          const fresh = await syncRemoteCatalog();
-          if (mounted) {
-            setBooks(fresh.books);
-            setCatalogMeta(fresh.meta);
-          }
-        } catch {
-          // Offline on boot: keep starter pack silently
-        } finally {
-          if (mounted) setSyncingCatalog(false);
+      // Silently refresh full catalog on launch while keeping cached/starter books instant
+      setSyncingCatalog(true);
+      try {
+        const fresh = await syncRemoteCatalog();
+        if (mounted) {
+          setBooks(fresh.books);
+          setCatalogMeta(fresh.meta);
         }
+      } catch {
+        // Offline on boot: keep cached or starter catalog silently
+      } finally {
+        if (mounted) setSyncingCatalog(false);
       }
     }
     void boot();

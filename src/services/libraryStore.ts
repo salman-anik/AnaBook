@@ -13,14 +13,17 @@ import type {
   ReadingStreak,
 } from '../types';
 
-const REMOTE_CATALOG_URL =
-  'https://salman-anik.github.io/Bangladesh-Biggest-eBook-Library/books.json';
+const REMOTE_CATALOG_URLS = [
+  'https://anabook-bd.vercel.app/books.json',
+  'https://salman-anik.github.io/Bangladesh-Biggest-eBook-Library/books.json',
+];
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const STARTER_CATALOG = require('../../assets/starter_books.json') as CompactCatalog;
 
 const BASE_DIR = FileSystem.documentDirectory ?? '';
-const CATALOG_CACHE_PATH = `${BASE_DIR}books_cache_v2.json`;
+const CATALOG_CACHE_PATH = `${BASE_DIR}books_cache_v3.json`;
+const OLD_CATALOG_CACHE_PATH = `${BASE_DIR}books_cache_v2.json`;
 const OFFLINE_BOOKS_DIR = `${BASE_DIR}offline_books/`;
 const OFFLINE_COVERS_DIR = `${BASE_DIR}offline_covers/`;
 
@@ -169,17 +172,36 @@ export async function loadCachedOrStarterCatalog(): Promise<{ books: Book[]; met
 }
 
 export async function syncRemoteCatalog(): Promise<{ books: Book[]; meta: CatalogMeta }> {
-  const resp = await fetch(REMOTE_CATALOG_URL);
-  if (!resp.ok) {
-    throw new Error(`Catalog fetch failed (HTTP ${resp.status})`);
+  let text = '';
+  let parsed: CompactCatalog | null = null;
+  let lastError = 'Unable to reach catalog server.';
+
+  for (const baseUrl of REMOTE_CATALOG_URLS) {
+    try {
+      const resp = await fetch(`${baseUrl}?t=${Date.now()}`, { cache: 'no-store' });
+      if (!resp.ok) {
+        throw new Error(`HTTP ${resp.status}`);
+      }
+      const body = await resp.text();
+      const candidate = JSON.parse(body) as CompactCatalog;
+      if (!candidate || !Array.isArray(candidate.books) || candidate.books.length === 0) {
+        throw new Error('Downloaded catalog is empty or malformed');
+      }
+      text = body;
+      parsed = candidate;
+      break;
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+    }
   }
-  const text = await resp.text();
-  const parsed = JSON.parse(text) as CompactCatalog;
-  if (!parsed || !Array.isArray(parsed.books) || parsed.books.length === 0) {
-    throw new Error('Downloaded catalog is empty or malformed');
+
+  if (!parsed || !text) {
+    throw new Error(`Catalog fetch failed (${lastError})`);
   }
+
   if (BASE_DIR) {
     await FileSystem.writeAsStringAsync(CATALOG_CACHE_PATH, text);
+    await FileSystem.deleteAsync(OLD_CATALOG_CACHE_PATH, { idempotent: true });
   }
   const syncedAt = new Date().toISOString().slice(0, 16).replace('T', ' ');
   await AsyncStorage.setItem(STORAGE_CATALOG_META_KEY, JSON.stringify({ syncedAt }));
@@ -194,6 +216,7 @@ export async function clearCatalogCache(): Promise<{ books: Book[]; meta: Catalo
   try {
     if (BASE_DIR) {
       await FileSystem.deleteAsync(CATALOG_CACHE_PATH, { idempotent: true });
+      await FileSystem.deleteAsync(OLD_CATALOG_CACHE_PATH, { idempotent: true });
     }
     await AsyncStorage.removeItem(STORAGE_CATALOG_META_KEY);
   } catch {
