@@ -27,7 +27,7 @@ interface Props {
   onClose: () => void;
 }
 
-const REPO_URL = 'https://github.com/salman-anik/Bangladesh-Biggest-eBook-Library';
+const REPO_URL = 'https://github.com/salman-anik/AnaBook';
 
 export function DeveloperScreen({ visible, onClose }: Props) {
   const { theme, fs } = useAppTheme();

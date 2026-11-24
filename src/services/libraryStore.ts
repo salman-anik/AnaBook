@@ -74,7 +74,7 @@ export function getThumbnailUrl(book: Book, fallback = false): string {
 }
 
 export function inflateCatalog(data: CompactCatalog): { books: Book[]; meta: Omit<CatalogMeta, 'source' | 'syncedAt'> } {
-  const { cats = [], subs = [], langs = [], fmts = [], books = [] } = data;
+  const { cats = [], subs = [], langs = [], fmts = [], books = [], links = [] } = data;
   const inflated: Book[] = books.map((r) => {
     const id = r[0] || '';
     const title = r[1] || 'Untitled';
@@ -100,6 +100,21 @@ export function inflateCatalog(data: CompactCatalog): { books: Book[]; meta: Omi
       searchBlob: `${title} ${author} ${cat} ${sub} ${series} ${fmt} ${lang}`.toLowerCase(),
     };
   });
+
+  if (Array.isArray(links) && links.length > 0) {
+    const byId = new Map<string, Book>();
+    for (const b of inflated) byId.set(b.id, b);
+    for (const lnk of links) {
+      if (!Array.isArray(lnk) || lnk.length < 3) continue;
+      const book = byId.get(lnk[0]);
+      if (!book) continue;
+      const cat = cats[lnk[1]] || 'Other';
+      const sub = subs[lnk[2]] || '';
+      if (!book.extraPaths) book.extraPaths = [];
+      book.extraPaths.push({ cat, sub });
+      book.searchBlob += ` ${cat} ${sub}`.toLowerCase();
+    }
+  }
 
   return {
     books: inflated,

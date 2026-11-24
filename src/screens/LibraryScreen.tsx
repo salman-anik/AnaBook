@@ -156,27 +156,35 @@ export const LibraryScreen = React.memo(function LibraryScreen({
 
     for (const b of books) {
       const isOff = Boolean(offlineById[b.id]);
-      if (b.cat) {
-        const c = catTotals.get(b.cat) || { total: 0, offline: 0 };
-        c.total += 1;
-        if (isOff) c.offline += 1;
-        catTotals.set(b.cat, c);
-      }
-      if (b.cat && b.sub) {
-        const parts = b.sub.split('/').filter(Boolean);
-        for (let i = 0; i < parts.length; i++) {
-          const p = [b.cat, ...parts.slice(0, i + 1)];
-          const k = p.join('/');
-          const f = folderTotals.get(k) || {
-            label: parts[i],
-            parentLabel: i === 0 ? b.cat : `${b.cat} › ${parts.slice(0, i).join(' › ')}`,
-            path: p,
-            total: 0,
-            offline: 0,
-          };
-          f.total += 1;
-          if (isOff) f.offline += 1;
-          folderTotals.set(k, f);
+      const seenCats = new Set<string>();
+      const seenFolders = new Set<string>();
+      const paths = [{ cat: b.cat, sub: b.sub }, ...(b.extraPaths || [])];
+      for (const ep of paths) {
+        if (ep.cat && !seenCats.has(ep.cat)) {
+          seenCats.add(ep.cat);
+          const c = catTotals.get(ep.cat) || { total: 0, offline: 0 };
+          c.total += 1;
+          if (isOff) c.offline += 1;
+          catTotals.set(ep.cat, c);
+        }
+        if (ep.cat && ep.sub) {
+          const parts = ep.sub.split('/').filter(Boolean);
+          for (let i = 0; i < parts.length; i++) {
+            const p = [ep.cat, ...parts.slice(0, i + 1)];
+            const k = p.join('/');
+            if (seenFolders.has(k)) continue;
+            seenFolders.add(k);
+            const f = folderTotals.get(k) || {
+              label: parts[i],
+              parentLabel: i === 0 ? ep.cat : `${ep.cat} › ${parts.slice(0, i).join(' › ')}`,
+              path: p,
+              total: 0,
+              offline: 0,
+            };
+            f.total += 1;
+            if (isOff) f.offline += 1;
+            folderTotals.set(k, f);
+          }
         }
       }
     }
@@ -241,8 +249,15 @@ export const LibraryScreen = React.memo(function LibraryScreen({
     if (!isSearchMode) return [];
     const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
     return books.filter((b) => {
-      if (catFilter && b.cat !== catFilter) return false;
-      if (subFilter && b.sub !== subFilter && !b.sub.startsWith(subFilter + '/')) return false;
+      if (catFilter || subFilter) {
+        const paths = [{ cat: b.cat, sub: b.sub }, ...(b.extraPaths || [])];
+        const matchesPath = paths.some((p) => {
+          if (catFilter && p.cat !== catFilter) return false;
+          if (subFilter && p.sub !== subFilter && !p.sub.startsWith(subFilter + '/')) return false;
+          return true;
+        });
+        if (!matchesPath) return false;
+      }
       for (const t of terms) {
         if (!b.searchBlob.includes(t)) return false;
       }

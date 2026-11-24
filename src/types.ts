@@ -18,6 +18,7 @@ export interface CompactCatalog {
   subs: string[];
   langs: string[];
   fmts: string[];
+  links?: [string, number, number][];
   books: [
     string, // 0: drive_file_id
     string, // 1: title
@@ -43,6 +44,7 @@ export interface Book {
   size: number;
   coverId: string;
   series: string;
+  extraPaths?: { cat: string; sub: string }[];
   searchBlob: string;
 }
 

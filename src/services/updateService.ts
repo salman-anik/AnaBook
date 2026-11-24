@@ -15,11 +15,14 @@ export const CURRENT_APP_VERSION = APP_CONFIG?.expo?.version || '1.1.1';
 export const CURRENT_VERSION_CODE = APP_CONFIG?.expo?.android?.versionCode ?? 3;
 
 const DEFAULT_RELEASE_PAGE =
-  'https://github.com/salman-anik/Bangladesh-Biggest-eBook-Library/releases/latest';
+  'https://github.com/salman-anik/AnaBook/releases/latest';
+
+const GITHUB_LATEST_RELEASE_API =
+  'https://api.github.com/repos/salman-anik/AnaBook/releases/latest';
 
 const VERSION_ENDPOINTS = [
+  'https://raw.githubusercontent.com/salman-anik/AnaBook/main/app-version.json',
   'https://anabook-bd.vercel.app/app-version.json',
-  'https://salman-anik.github.io/Bangladesh-Biggest-eBook-Library/app-version.json',
 ];
 
 const APK_CACHE_FILE = `${FileSystem.cacheDirectory ?? ''}anabook-update.apk`;
@@ -90,7 +93,7 @@ export async function checkForAppUpdate(): Promise<AppUpdateInfo> {
       const directApk =
         data.apkDownloadUrl ||
         (latestVersion
-          ? `https://github.com/salman-anik/Bangladesh-Biggest-eBook-Library/releases/download/v${latestVersion}/AnaBook.apk`
+          ? `https://github.com/salman-anik/AnaBook/releases/download/v${latestVersion}/AnaBook.apk`
           : undefined);
 
       return {
@@ -106,6 +109,49 @@ export async function checkForAppUpdate(): Promise<AppUpdateInfo> {
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);
     }
+  }
+
+  // Fallback to GitHub Releases API for salman-anik/AnaBook
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await fetch(GITHUB_LATEST_RELEASE_API, {
+      headers: { Accept: 'application/vnd.github+json' },
+      cache: 'no-store',
+      signal: controller.signal,
+    });
+    if (res.ok) {
+      const ghData = (await res.json()) as {
+        tag_name?: string;
+        body?: string;
+        html_url?: string;
+        assets?: { name?: string; browser_download_url?: string }[];
+      };
+      const latestVersion = (ghData.tag_name || '').replace(/^v/i, '').trim();
+      if (latestVersion) {
+        const hasUpdate = compareSemver(latestVersion, CURRENT_APP_VERSION) > 0;
+        const apkAsset = ghData.assets?.find((a) =>
+          (a.name || '').toLowerCase().endsWith('.apk')
+        );
+        const directApk =
+          apkAsset?.browser_download_url ||
+          `https://github.com/salman-anik/AnaBook/releases/download/v${latestVersion}/AnaBook.apk`;
+        return {
+          hasUpdate,
+          currentVersion: CURRENT_APP_VERSION,
+          latestVersion,
+          versionCode: hasUpdate ? CURRENT_VERSION_CODE + 1 : CURRENT_VERSION_CODE,
+          releaseNotes: ghData.body || '',
+          downloadUrl: ghData.html_url || DEFAULT_RELEASE_PAGE,
+          apkDownloadUrl: directApk,
+          checkedAt,
+        };
+      }
+    }
+  } catch (err) {
+    lastError = err instanceof Error ? err.message : String(err);
+  } finally {
+    clearTimeout(timer);
   }
 
   return {

@@ -93,21 +93,34 @@ function computeNodeStats(node: TreeNode): { count: number; previews: Book[] } {
   return { count, previews };
 }
 
-function collectNodeBooks(node: TreeNode): Book[] {
-  const result: Book[] = [...node.directBooks];
+function collectNodeBooks(node: TreeNode, seen = new Set<string>()): Book[] {
+  const result: Book[] = [];
+  for (const b of node.directBooks) {
+    if (!seen.has(b.id)) {
+      seen.add(b.id);
+      result.push(b);
+    }
+  }
   for (const child of node.children.values()) {
-    result.push(...collectNodeBooks(child));
+    result.push(...collectNodeBooks(child, seen));
   }
   return result;
 }
 
-function countOfflineInNode(node: TreeNode, offlineById: Record<string, OfflineBookEntry>): number {
+function countOfflineInNode(
+  node: TreeNode,
+  offlineById: Record<string, OfflineBookEntry>,
+  seen = new Set<string>()
+): number {
   let c = 0;
   for (const b of node.directBooks) {
-    if (offlineById[b.id]) c++;
+    if (!seen.has(b.id)) {
+      seen.add(b.id);
+      if (offlineById[b.id]) c++;
+    }
   }
   for (const child of node.children.values()) {
-    c += countOfflineInNode(child, offlineById);
+    c += countOfflineInNode(child, offlineById, seen);
   }
   return c;
 }
@@ -241,25 +254,26 @@ export const ExploreScreen = React.memo(function ExploreScreen({
       }
     }
 
-    for (const book of books) {
-      let catNode = root.children.get(book.cat);
+    const addBookToTree = (cat: string, sub: string, book: Book) => {
+      const catName = cat || 'Other';
+      let catNode = root.children.get(catName);
       if (!catNode) {
         catNode = {
-          name: book.cat,
-          cat: book.cat,
+          name: catName,
+          cat: catName,
           sub: '',
           children: new Map(),
           directBooks: [],
           totalCount: 0,
           previews: [],
         };
-        root.children.set(book.cat, catNode);
+        root.children.set(catName, catNode);
       }
       let curr = catNode;
-      if (book.sub) {
-        const rawParts = book.sub.split('/').filter(Boolean);
+      if (sub) {
+        const rawParts = sub.split('/').filter(Boolean);
         const promoteOtherReligion =
-          book.cat === 'Religion Books' &&
+          catName === 'Religion Books' &&
           rawParts[0] === 'Other Religions' &&
           rawParts.length >= 2;
         const parts = promoteOtherReligion ? rawParts.slice(1) : rawParts;
@@ -270,7 +284,7 @@ export const ExploreScreen = React.memo(function ExploreScreen({
           if (!child) {
             child = {
               name: p,
-              cat: book.cat,
+              cat: catName,
               sub: acc,
               children: new Map(),
               directBooks: [],
@@ -282,7 +296,18 @@ export const ExploreScreen = React.memo(function ExploreScreen({
           curr = child;
         }
       }
-      curr.directBooks.push(book);
+      if (!curr.directBooks.some((existing) => existing.id === book.id)) {
+        curr.directBooks.push(book);
+      }
+    };
+
+    for (const book of books) {
+      addBookToTree(book.cat, book.sub, book);
+      if (book.extraPaths?.length) {
+        for (const ep of book.extraPaths) {
+          addBookToTree(ep.cat, ep.sub, book);
+        }
+      }
     }
 
     computeNodeStats(root);
