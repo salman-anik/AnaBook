@@ -204,12 +204,21 @@ export async function downloadAppUpdateApk(
 
   const result = await downloadResumable.downloadAsync();
   if (!result || !result.uri) {
+    await cleanupDownloadedUpdate();
     throw new Error('Failed to complete APK download');
   }
 
+  if (typeof result.status === 'number' && (result.status < 200 || result.status >= 300)) {
+    await cleanupDownloadedUpdate();
+    throw new Error(
+      `Update APK is not ready yet (HTTP ${result.status}). Please try again in a few minutes.`
+    );
+  }
+
   const fileInfo = await FileSystem.getInfoAsync(result.uri);
-  if (!fileInfo.exists || fileInfo.size === 0) {
-    throw new Error('Downloaded APK file is empty or missing');
+  if (!fileInfo.exists || !fileInfo.size || fileInfo.size < 1_000_000) {
+    await cleanupDownloadedUpdate();
+    throw new Error('Downloaded APK file is incomplete or invalid. Please try again.');
   }
 
   return result.uri;
@@ -222,35 +231,30 @@ export async function downloadAppUpdateApk(
 export async function installAppUpdate(apkLocalUri?: string): Promise<void> {
   const fileUri = apkLocalUri || APK_CACHE_FILE;
   const fileInfo = await FileSystem.getInfoAsync(fileUri);
-  if (!fileInfo.exists) {
-    throw new Error('Update file not found. Please download the update again.');
+  if (!fileInfo.exists || !fileInfo.size || fileInfo.size < 1_000_000) {
+    await cleanupDownloadedUpdate();
+    throw new Error('Update file is missing or incomplete. Please download the update again.');
   }
 
-  try {
-    if (Platform.OS === 'android') {
-      // Obtain content:// URI for the FileProvider
-      const contentUri = await FileSystem.getContentUriAsync(fileUri);
-      await IntentLauncher.startActivityAsync('android.intent.action.VIEW', {
-        data: contentUri,
-        flags: 1, // FLAG_GRANT_READ_URI_PERMISSION
-        type: 'application/vnd.android.package-archive',
+  if (Platform.OS === 'android') {
+    // Obtain content:// URI via FileProvider and keep cached APK until next app startup
+    // so Android's PackageInstaller can finish reading and installing it cleanly.
+    const contentUri = await FileSystem.getContentUriAsync(fileUri);
+    await IntentLauncher.startActivityAsync('android.intent.action.VIEW', {
+      data: contentUri,
+      flags: 0x10000001, // FLAG_ACTIVITY_NEW_TASK | FLAG_GRANT_READ_URI_PERMISSION
+      type: 'application/vnd.android.package-archive',
+    });
+  } else {
+    // iOS / Web fallback
+    const canShare = await Sharing.isAvailableAsync();
+    if (canShare) {
+      await Sharing.shareAsync(fileUri, {
+        mimeType: 'application/vnd.android.package-archive',
+        dialogTitle: 'Install AnaBook Update',
       });
     } else {
-      // iOS / Web fallback
-      const canShare = await Sharing.isAvailableAsync();
-      if (canShare) {
-        await Sharing.shareAsync(fileUri, {
-          mimeType: 'application/vnd.android.package-archive',
-          dialogTitle: 'Install AnaBook Update',
-        });
-      } else {
-        await Linking.openURL(DEFAULT_RELEASE_PAGE);
-      }
+      await Linking.openURL(DEFAULT_RELEASE_PAGE);
     }
-  } finally {
-    // Clean up temporary downloaded APK so it doesn't waste storage space
-    setTimeout(() => {
-      void cleanupDownloadedUpdate();
-    }, 1500);
   }
 }

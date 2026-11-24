@@ -43,7 +43,7 @@ import {
   syncRemoteCatalog,
   updateProgressMap,
 } from './src/services/libraryStore';
-import { type AppUpdateInfo, checkForAppUpdate } from './src/services/updateService';
+import { type AppUpdateInfo, checkForAppUpdate, cleanupDownloadedUpdate } from './src/services/updateService';
 import { THEME_PRESETS } from './src/theme';
 import type {
   AppPersistedState,
@@ -149,6 +149,10 @@ function MainApp() {
       }
     }
   }, [windowWidth, booting]);
+
+  useEffect(() => {
+    void cleanupDownloadedUpdate();
+  }, []);
 
   const handlePagerMomentumEnd = useCallback(
     (e: NativeSyntheticEvent<NativeScrollEvent>) => {

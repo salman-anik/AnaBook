@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Linking,
   Modal,
   StyleSheet,
   Text,
@@ -34,6 +35,7 @@ export function AppUpdateModal({ visible, updateInfo, onClose }: Props) {
   const [totalBytes, setTotalBytes] = useState(0);
   const [downloadedUri, setDownloadedUri] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [installerLaunched, setInstallerLaunched] = useState(false);
 
   if (!updateInfo) return null;
 
@@ -47,6 +49,7 @@ export function AppUpdateModal({ visible, updateInfo, onClose }: Props) {
     setStatus('downloading');
     setProgress(0);
     setErrorMessage(null);
+    setInstallerLaunched(false);
 
     try {
       const uri = await downloadAppUpdateApk(apkUrl, (fraction, written, total) => {
@@ -64,12 +67,11 @@ export function AppUpdateModal({ visible, updateInfo, onClose }: Props) {
 
   const handleInstall = async () => {
     setStatus('installing');
+    setErrorMessage(null);
     try {
       await installAppUpdate(downloadedUri || undefined);
-      // Once launched installer, clean up state
-      setStatus('idle');
-      setDownloadedUri(null);
-      onClose();
+      setInstallerLaunched(true);
+      setStatus('ready');
     } catch (err) {
       setStatus('error');
       setErrorMessage(err instanceof Error ? err.message : String(err));
@@ -84,7 +86,12 @@ export function AppUpdateModal({ visible, updateInfo, onClose }: Props) {
     setDownloadedUri(null);
     setProgress(0);
     setErrorMessage(null);
+    setInstallerLaunched(false);
     onClose();
+  };
+
+  const handleOpenInBrowser = () => {
+    void Linking.openURL(updateInfo.apkDownloadUrl || updateInfo.downloadUrl);
   };
 
   const formatSize = (bytes: number) => {
@@ -160,10 +167,14 @@ export function AppUpdateModal({ visible, updateInfo, onClose }: Props) {
           {status === 'ready' && (
             <View style={[styles.readyBanner, { backgroundColor: theme.surfaceAlt }]}>
               <Text style={[styles.readyText, { color: theme.accent, fontSize: fs(12.5) }]}>
-                ✓ Download complete! Tap Install Now to update.
+                {installerLaunched
+                  ? 'Android installer requested.'
+                  : '✓ Download complete! Tap Install Now to update.'}
               </Text>
               <Text style={[styles.cleanupNote, { color: theme.muted, fontSize: fs(11) }]}>
-                The temporary APK will be automatically deleted after installation to save storage.
+                {installerLaunched
+                  ? "If the installer didn't appear, allow 'Install unknown apps' for AnaBook in Settings or tap Open in Browser."
+                  : 'The temporary APK will be automatically deleted when the app restarts after installation.'}
               </Text>
             </View>
           )}
@@ -190,6 +201,18 @@ export function AppUpdateModal({ visible, updateInfo, onClose }: Props) {
                   </Text>
                 </TouchableOpacity>
 
+                {status === 'error' ? (
+                  <TouchableOpacity
+                    style={[styles.secondaryBtn, { borderColor: theme.border }]}
+                    onPress={handleOpenInBrowser}
+                    activeOpacity={0.8}
+                  >
+                    <Text style={[styles.secondaryBtnText, { color: theme.ink, fontSize: fs(13) }]}>
+                      Open in Browser
+                    </Text>
+                  </TouchableOpacity>
+                ) : null}
+
                 <TouchableOpacity
                   style={[styles.primaryBtn, { backgroundColor: theme.accent }]}
                   onPress={handleStartDownload}
@@ -197,7 +220,7 @@ export function AppUpdateModal({ visible, updateInfo, onClose }: Props) {
                 >
                   <DownloadIcon color={theme.creamInk} size={15} />
                   <Text style={[styles.primaryBtnText, { color: theme.creamInk, fontSize: fs(13) }]}>
-                    Download Update
+                    {status === 'error' ? 'Retry' : 'Download Update'}
                   </Text>
                 </TouchableOpacity>
               </>
@@ -223,6 +246,18 @@ export function AppUpdateModal({ visible, updateInfo, onClose }: Props) {
                     Cancel
                   </Text>
                 </TouchableOpacity>
+
+                {installerLaunched ? (
+                  <TouchableOpacity
+                    style={[styles.secondaryBtn, { borderColor: theme.border }]}
+                    onPress={handleOpenInBrowser}
+                    activeOpacity={0.8}
+                  >
+                    <Text style={[styles.secondaryBtnText, { color: theme.ink, fontSize: fs(13) }]}>
+                      Open in Browser
+                    </Text>
+                  </TouchableOpacity>
+                ) : null}
 
                 <TouchableOpacity
                   style={[styles.primaryBtn, { backgroundColor: theme.accent }]}
@@ -349,6 +384,7 @@ const styles = StyleSheet.create({
   },
   actionsRow: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     alignItems: 'center',
     justifyContent: 'flex-end',
     gap: 10,

@@ -60,7 +60,9 @@ jobs:
           mkdir -p release_assets
           cp "$APK_SRC" "release_assets/AnaBook.apk"
           cp "$APK_SRC" "release_assets/AnaBook-${TAG}.apk"
+          VERSION_CODE=$(node -p "require('./app.json').expo.android.versionCode")
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Publish GitHub Release
@@ -76,4 +78,30 @@ jobs:
             gh release create "$TAG" release_assets/AnaBook.apk "release_assets/AnaBook-${TAG}.apk" \
               --title "AnaBook ${TAG}" \
               --notes "${NOTES:-AnaBook Release ${TAG}}"
+          fi
+
+      - name: Update app-version.json
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          VERSION_CODE: ${{ steps.meta.outputs.version_code }}
+          NOTES: ${{ github.event.inputs.release_notes }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const manifest = {
+              latestVersion: process.env.VERSION,
+              versionCode: Number(process.env.VERSION_CODE),
+              downloadUrl: "https://github.com/salman-anik/AnaBook/releases/latest",
+              apkDownloadUrl: "https://github.com/salman-anik/AnaBook/releases/latest/download/AnaBook.apk",
+              releaseNotes: process.env.NOTES || `AnaBook v${process.env.VERSION}`,
+            };
+            fs.writeFileSync("app-version.json", JSON.stringify(manifest, null, 2) + "\n");
+          '
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add app-version.json
+          if ! git diff --staged --quiet; then
+            git commit -m "chore(release): publish app-version.json for v${VERSION}"
+            git pull --rebase origin main
+            git push
           fi
