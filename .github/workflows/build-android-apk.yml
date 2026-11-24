@@ -102,6 +102,6 @@ jobs:
           git add app-version.json
           if ! git diff --staged --quiet; then
             git commit -m "chore(release): publish app-version.json for v${VERSION}"
-            git pull --rebase origin main
+            git pull --rebase --autostash origin main
             git push
           fi
