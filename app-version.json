@@ -1,7 +1,7 @@
 {
-  "latestVersion": "1.1.5",
-  "versionCode": 7,
+  "latestVersion": "1.1.6",
+  "versionCode": 8,
   "downloadUrl": "https://github.com/salman-anik/AnaBook/releases/latest",
   "apkDownloadUrl": "https://github.com/salman-anik/AnaBook/releases/latest/download/AnaBook.apk",
-  "releaseNotes": "AnaBook v1.1.5 — Automatic background catalog sync on startup, cache-busted books.json refresh, and v3 cache migration so all 8 Series & Collections folders appear immediately."
+  "releaseNotes": "AnaBook v1.1.6 — In-app EPUB & MOBI reader, floating download progress pill with stop/cancel, Android Downloads folder export, bilingual Bangla-English semantic search (including Class 5 & deep categories), curated Home novels/classics, offline delete confirmation, and theme-switch pager fix."
 }

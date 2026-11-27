@@ -6,6 +6,7 @@ import {
   BackHandler,
   Image,
   Linking,
+  Modal,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
   ScrollView,
@@ -19,7 +20,7 @@ import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-
 
 import { BookDetailModal } from './src/components/BookDetailModal';
 import { BottomNavBar } from './src/components/BottomNavBar';
-import { CloseIcon } from './src/components/Icons';
+import { CloseIcon, DownloadIcon } from './src/components/Icons';
 import { ReaderModal } from './src/components/ReaderModal';
 import { AppUpdateModal } from './src/components/AppUpdateModal';
 import { ThemeProvider } from './src/context/ThemeContext';
@@ -30,11 +31,13 @@ import { MoreScreen } from './src/screens/MoreScreen';
 import { SearchScreen } from './src/screens/SearchScreen';
 import {
   bumpDailyStreak,
+  cancelBookDownload,
   type CatalogMeta,
   clearCatalogCache,
   downloadBookOffline,
   formatBytes,
   getDefaultState,
+  isDownloadCancelledError,
   loadCachedOrStarterCatalog,
   loadPersistedState,
   openOfflineBookFile,
@@ -64,11 +67,10 @@ function MainApp() {
   const pagerRef = useRef<React.ComponentRef<typeof ScrollView> | null>(null);
   const [activeTab, setActiveTab] = useState<TabKey>('home');
   const [visitedTabs, setVisitedTabs] = useState<TabKey[]>(['home', 'library']);
-  const [pagerLocked, setPagerLocked] = useState(false);
   const handleHorizontalTouchLock = useCallback((locked: boolean) => {
     pagerRef.current?.setNativeProps({ scrollEnabled: !locked });
-    setPagerLocked(locked);
   }, []);
+  const [downloadSheetOpen, setDownloadSheetOpen] = useState(false);
   const [books, setBooks] = useState<Book[]>([]);
   const [catalogMeta, setCatalogMeta] = useState<CatalogMeta>({
     source: 'starter',
@@ -145,10 +147,13 @@ function MainApp() {
     if (!booting) {
       const idx = TAB_ORDER.indexOf(activeTab);
       if (idx >= 0) {
-        pagerRef.current?.scrollTo({ x: idx * windowWidth, animated: false });
+        const frame = requestAnimationFrame(() => {
+          pagerRef.current?.scrollTo({ x: idx * windowWidth, animated: false });
+        });
+        return () => cancelAnimationFrame(frame);
       }
     }
-  }, [windowWidth, booting]);
+  }, [windowWidth, booting, themeMode, themePreset, fontScale]);
 
   useEffect(() => {
     void cleanupDownloadedUpdate();
@@ -240,7 +245,7 @@ function MainApp() {
     async (book: Book, entry: OfflineBookEntry) => {
       markReadActivity(book.id);
       const upper = book.fmt.toUpperCase();
-      if (['JPG', 'JPEG', 'PNG', 'TXT', 'MD'].includes(upper)) {
+      if (['JPG', 'JPEG', 'PNG', 'TXT', 'MD', 'EPUB', 'MOBI'].includes(upper)) {
         setDetailBook(null);
         setReaderBook(book);
         return;
@@ -275,23 +280,34 @@ function MainApp() {
     [appState.offlineById, handleOpenOffline, handleReadOnline]
   );
 
+  const handleCancelDownload = useCallback((bookId: string) => {
+    void cancelBookDownload(bookId);
+    setDownloadingMap((m) => {
+      const next = { ...m };
+      delete next[bookId];
+      return next;
+    });
+  }, []);
+
   const handleMakeOffline = useCallback(
     async (book: Book) => {
       if (downloadingMap[book.id] !== undefined) return;
       setDownloadingMap((m) => ({ ...m, [book.id]: 1 }));
       try {
         const entry = await downloadBookOffline(book, (pct) => {
-          setDownloadingMap((m) => ({ ...m, [book.id]: pct }));
+          setDownloadingMap((m) => (m[book.id] !== undefined ? { ...m, [book.id]: pct } : m));
         });
         persist((prev) => ({
           ...prev,
           offlineById: { ...prev.offlineById, [book.id]: entry },
         }));
       } catch (err) {
-        Alert.alert(
-          'Offline Download Failed',
-          err instanceof Error ? err.message : 'Unable to download book for offline use.'
-        );
+        if (!isDownloadCancelledError(err)) {
+          Alert.alert(
+            'Offline Download Failed',
+            err instanceof Error ? err.message : 'Unable to download book for offline use.'
+          );
+        }
       } finally {
         setDownloadingMap((m) => {
           const next = { ...m };
@@ -391,16 +407,32 @@ function MainApp() {
   }, []);
 
   const handleRemoveOffline = useCallback(
-    async (bookId: string) => {
+    (bookId: string) => {
       const entry = appState.offlineById[bookId];
-      if (entry) {
-        await removeOfflineBook(entry);
-      }
-      persist((prev) => {
-        const nextOffline = { ...prev.offlineById };
-        delete nextOffline[bookId];
-        return { ...prev, offlineById: nextOffline };
-      });
+      const title = entry?.title || 'this book';
+      Alert.alert(
+        'Remove Offline Book?',
+        `Delete "${title}" from offline storage? You can download it again anytime.`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Delete',
+            style: 'destructive',
+            onPress: () => {
+              void (async () => {
+                if (entry) {
+                  await removeOfflineBook(entry);
+                }
+                persist((prev) => {
+                  const nextOffline = { ...prev.offlineById };
+                  delete nextOffline[bookId];
+                  return { ...prev, offlineById: nextOffline };
+                });
+              })();
+            },
+          },
+        ]
+      );
     },
     [appState.offlineById, persist]
   );
@@ -648,7 +680,6 @@ function MainApp() {
           style={styles.stage}
           horizontal
           pagingEnabled
-          scrollEnabled={!pagerLocked}
           nestedScrollEnabled
           directionalLockEnabled
           showsHorizontalScrollIndicator={false}
@@ -781,6 +812,7 @@ function MainApp() {
           onReadOnline={handleReadOnline}
           onOpenOffline={handleOpenOffline}
           onMakeOffline={handleMakeOffline}
+          onCancelDownload={handleCancelDownload}
           onRemoveOffline={handleRemoveOffline}
           onToggleSave={handleToggleSave}
           onSetCurrentlyReading={handleSetCurrentlyReading}
@@ -793,8 +825,116 @@ function MainApp() {
           downloadingPct={readerBook ? downloadingMap[readerBook.id] ?? null : null}
           onClose={() => setReaderBook(null)}
           onMakeOffline={handleMakeOffline}
+          onCancelDownload={handleCancelDownload}
           onOpenOfflineExternal={handleOpenOffline}
         />
+
+        {/* Side Rounded Floating Download Progress Icon */}
+        {(() => {
+          const activeIds = Object.keys(downloadingMap);
+          if (activeIds.length === 0 && !batchDownload) return null;
+          const primaryId = activeIds[0];
+          const primaryPct = primaryId ? downloadingMap[primaryId] : 0;
+          const label = batchDownload
+            ? `${batchDownload.completed}/${batchDownload.total}`
+            : `${primaryPct}%`;
+          return (
+            <TouchableOpacity
+              style={[
+                styles.downloadFab,
+                {
+                  bottom: 84 + insets.bottom,
+                  backgroundColor: activeTheme.surfaceDeep,
+                  borderColor: activeTheme.accent,
+                },
+              ]}
+              onPress={() => setDownloadSheetOpen(true)}
+              activeOpacity={0.86}
+              accessibilityLabel="Active downloads"
+            >
+              <DownloadIcon size={15} color={activeTheme.accent} />
+              <Text style={[styles.downloadFabText, { color: activeTheme.ink }]}>{label}</Text>
+            </TouchableOpacity>
+          );
+        })()}
+
+        {/* Active Downloads / Stop Download Modal */}
+        <Modal
+          visible={downloadSheetOpen && (Object.keys(downloadingMap).length > 0 || Boolean(batchDownload))}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setDownloadSheetOpen(false)}
+        >
+          <View style={styles.dlModalBackdrop}>
+            <View
+              style={[
+                styles.dlModalCard,
+                { backgroundColor: activeTheme.surface, borderColor: activeTheme.border },
+              ]}
+            >
+              <View style={styles.dlModalHead}>
+                <Text style={[styles.dlModalTitle, { color: activeTheme.ink }]}>
+                  Active Downloads
+                </Text>
+                <TouchableOpacity onPress={() => setDownloadSheetOpen(false)}>
+                  <CloseIcon size={18} color={activeTheme.muted} />
+                </TouchableOpacity>
+              </View>
+
+              {batchDownload ? (
+                <View style={[styles.dlItemRow, { borderColor: activeTheme.border }]}>
+                  <View style={styles.dlItemInfo}>
+                    <Text style={[styles.dlItemTitle, { color: activeTheme.ink }]} numberOfLines={1}>
+                      Folder: {batchDownload.folderName}
+                    </Text>
+                    <Text style={[styles.dlItemSub, { color: activeTheme.muted }]} numberOfLines={1}>
+                      {batchDownload.completed} / {batchDownload.total} · {batchDownload.currentTitle}
+                    </Text>
+                  </View>
+                  <TouchableOpacity
+                    style={[styles.dlStopBtn, { borderColor: activeTheme.danger }]}
+                    onPress={() => {
+                      handleCancelBatchDownload();
+                      for (const id of Object.keys(downloadingMap)) {
+                        handleCancelDownload(id);
+                      }
+                      setDownloadSheetOpen(false);
+                    }}
+                  >
+                    <Text style={[styles.dlStopText, { color: activeTheme.danger }]}>Stop</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : null}
+
+              {Object.entries(downloadingMap).map(([id, pct]) => {
+                const b = books.find((x) => x.id === id);
+                return (
+                  <View key={id} style={[styles.dlItemRow, { borderColor: activeTheme.border }]}>
+                    <View style={styles.dlItemInfo}>
+                      <Text style={[styles.dlItemTitle, { color: activeTheme.ink }]} numberOfLines={1}>
+                        {b?.title || 'Book'}
+                      </Text>
+                      <Text style={[styles.dlItemSub, { color: activeTheme.accent }]}>
+                        Downloading… {pct}%
+                      </Text>
+                    </View>
+                    <TouchableOpacity
+                      style={[styles.dlStopBtn, { borderColor: activeTheme.danger }]}
+                      onPress={() => {
+                        handleCancelDownload(id);
+                        if (Object.keys(downloadingMap).length <= 1 && !batchDownload) {
+                          setDownloadSheetOpen(false);
+                        }
+                      }}
+                    >
+                      <Text style={[styles.dlStopText, { color: activeTheme.danger }]}>Stop</Text>
+                    </TouchableOpacity>
+                  </View>
+                );
+              })}
+            </View>
+          </View>
+        </Modal>
 
         <AppUpdateModal
           visible={updateModalOpen}
@@ -853,4 +993,57 @@ const styles = StyleSheet.create({
   },
   updateBannerBtnText: { fontSize: 11.5, fontWeight: '800' },
   updateBannerClose: { padding: 4 },
+  downloadFab: {
+    position: 'absolute',
+    right: 14,
+    width: 54,
+    height: 54,
+    borderRadius: 27,
+    borderWidth: 1.5,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.28,
+    shadowRadius: 8,
+    elevation: 7,
+  },
+  downloadFabText: { fontSize: 10.5, fontWeight: '800' },
+  dlModalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.62)',
+    justifyContent: 'center',
+    paddingHorizontal: 22,
+  },
+  dlModalCard: {
+    borderRadius: 20,
+    borderWidth: 1,
+    padding: 16,
+    gap: 12,
+  },
+  dlModalHead: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  dlModalTitle: { fontSize: 16, fontWeight: '800' },
+  dlItemRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    paddingTop: 10,
+  },
+  dlItemInfo: { flex: 1, gap: 2 },
+  dlItemTitle: { fontSize: 13.5, fontWeight: '700' },
+  dlItemSub: { fontSize: 11.5, fontWeight: '600' },
+  dlStopBtn: {
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  dlStopText: { fontSize: 12, fontWeight: '800' },
 });

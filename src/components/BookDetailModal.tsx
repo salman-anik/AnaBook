@@ -36,6 +36,7 @@ interface Props {
   onReadOnline: (book: Book) => void;
   onOpenOffline: (book: Book, entry: OfflineBookEntry) => void;
   onMakeOffline: (book: Book) => void;
+  onCancelDownload?: (bookId: string) => void;
   onRemoveOffline: (bookId: string) => void;
   onToggleSave: (bookId: string) => void;
   onSetCurrentlyReading: (bookId: string) => void;
@@ -53,6 +54,7 @@ export function BookDetailModal({
   onReadOnline,
   onOpenOffline,
   onMakeOffline,
+  onCancelDownload,
   onRemoveOffline,
   onToggleSave,
   onSetCurrentlyReading,
@@ -170,6 +172,16 @@ export function BookDetailModal({
                   <Text style={[styles.downloadingText, { color: theme.accent, fontSize: fs(13.5) }]}>
                     Saving offline… {downloadingPct}%
                   </Text>
+                  {onCancelDownload ? (
+                    <TouchableOpacity
+                      style={[styles.cancelDlBtn, { borderColor: theme.danger }]}
+                      onPress={() => onCancelDownload(book.id)}
+                      activeOpacity={0.82}
+                    >
+                      <CloseIcon size={13} color={theme.danger} />
+                      <Text style={[styles.cancelDlText, { color: theme.danger }]}>Stop</Text>
+                    </TouchableOpacity>
+                  ) : null}
                 </View>
               ) : (
                 <TouchableOpacity
@@ -346,6 +358,17 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   downloadingText: { fontWeight: '700' },
+  cancelDlBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    borderWidth: 1,
+    borderRadius: 14,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    marginLeft: 6,
+  },
+  cancelDlText: { fontSize: 12, fontWeight: '800' },
   secondaryRow: { flexDirection: 'row', gap: 10 },
   halfBtn: {
     flex: 1,

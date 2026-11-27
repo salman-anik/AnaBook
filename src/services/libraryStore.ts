@@ -29,6 +29,27 @@ const OFFLINE_COVERS_DIR = `${BASE_DIR}offline_covers/`;
 
 const STORAGE_STATE_KEY = 'bd_ebook_app_state_v1';
 const STORAGE_CATALOG_META_KEY = 'bd_ebook_catalog_meta_v1';
+const STORAGE_DOWNLOADS_DIR_URI_KEY = 'bd_ebook_downloads_dir_v1';
+
+const activeDownloads = new Map<string, FileSystem.DownloadResumable>();
+const cancelledDownloadIds = new Set<string>();
+
+export function isDownloadCancelledError(err: unknown): boolean {
+  return err instanceof Error && err.message === 'DOWNLOAD_CANCELLED';
+}
+
+export async function cancelBookDownload(bookId: string): Promise<void> {
+  cancelledDownloadIds.add(bookId);
+  const resumable = activeDownloads.get(bookId);
+  if (resumable) {
+    try {
+      await resumable.cancelAsync();
+    } catch {
+      // Ignore cancel error
+    }
+    activeDownloads.delete(bookId);
+  }
+}
 
 const MIME_BY_FMT: Record<string, string> = {
   PDF: 'application/pdf',
@@ -354,42 +375,67 @@ export async function downloadBookOffline(
 
   let finalSize = 0;
   let lastErr: Error | null = null;
+  cancelledDownloadIds.delete(book.id);
 
-  for (const url of urls) {
-    try {
-      const resumable = FileSystem.createDownloadResumable(url, localUri, {}, (p) => {
-        if (p.totalBytesExpectedToWrite > 0) {
-          onProgress(Math.round((p.totalBytesWritten / p.totalBytesExpectedToWrite) * 100));
-        } else if (book.size > 0) {
-          onProgress(Math.min(98, Math.round((p.totalBytesWritten / book.size) * 100)));
+  try {
+    for (const url of urls) {
+      if (cancelledDownloadIds.has(book.id)) {
+        throw new Error('DOWNLOAD_CANCELLED');
+      }
+      try {
+        const resumable = FileSystem.createDownloadResumable(url, localUri, {}, (p) => {
+          if (cancelledDownloadIds.has(book.id)) return;
+          if (p.totalBytesExpectedToWrite > 0) {
+            onProgress(Math.round((p.totalBytesWritten / p.totalBytesExpectedToWrite) * 100));
+          } else if (book.size > 0) {
+            onProgress(Math.min(98, Math.round((p.totalBytesWritten / book.size) * 100)));
+          }
+        });
+        activeDownloads.set(book.id, resumable);
+        const res = await resumable.downloadAsync();
+        activeDownloads.delete(book.id);
+
+        if (cancelledDownloadIds.has(book.id)) {
+          await FileSystem.deleteAsync(localUri, { idempotent: true });
+          throw new Error('DOWNLOAD_CANCELLED');
         }
-      });
-      const res = await resumable.downloadAsync();
-      if (!res || res.status >= 400) {
-        throw new Error(`HTTP ${res?.status ?? 'error'}`);
+        if (!res || res.status >= 400) {
+          throw new Error(`HTTP ${res?.status ?? 'error'}`);
+        }
+        const ctype = (res.headers?.['content-type'] || res.headers?.['Content-Type'] || '').toLowerCase();
+        if (ctype.includes('text/html')) {
+          await FileSystem.deleteAsync(localUri, { idempotent: true });
+          lastErr = new Error('Drive returned HTML interstitial; trying confirm URL');
+          continue;
+        }
+        const info = await FileSystem.getInfoAsync(localUri);
+        if (!info.exists || (info.size ?? 0) < 512) {
+          await FileSystem.deleteAsync(localUri, { idempotent: true });
+          throw new Error('Downloaded file was empty or invalid');
+        }
+        finalSize = info.size ?? book.size;
+        lastErr = null;
+        break;
+      } catch (err) {
+        activeDownloads.delete(book.id);
+        if (cancelledDownloadIds.has(book.id) || isDownloadCancelledError(err)) {
+          await FileSystem.deleteAsync(localUri, { idempotent: true });
+          throw new Error('DOWNLOAD_CANCELLED');
+        }
+        lastErr = err instanceof Error ? err : new Error(String(err));
       }
-      const ctype = (res.headers?.['content-type'] || res.headers?.['Content-Type'] || '').toLowerCase();
-      if (ctype.includes('text/html')) {
-        await FileSystem.deleteAsync(localUri, { idempotent: true });
-        lastErr = new Error('Drive returned HTML interstitial; trying confirm URL');
-        continue;
-      }
-      const info = await FileSystem.getInfoAsync(localUri);
-      if (!info.exists || (info.size ?? 0) < 512) {
-        await FileSystem.deleteAsync(localUri, { idempotent: true });
-        throw new Error('Downloaded file was empty or invalid');
-      }
-      finalSize = info.size ?? book.size;
-      lastErr = null;
-      break;
-    } catch (err) {
-      lastErr = err instanceof Error ? err : new Error(String(err));
     }
+  } finally {
+    activeDownloads.delete(book.id);
+    cancelledDownloadIds.delete(book.id);
   }
 
   if (lastErr) {
     throw lastErr;
   }
+
+  // Best-effort copy to Android mobile Downloads folder if user granted permission
+  void exportToAndroidDownloadsIfPermitted(book, localUri, finalSize, ext);
 
   // Also cache cover thumbnail locally for offline browsing
   let coverLocalUri: string | undefined;
@@ -420,6 +466,85 @@ export async function downloadBookOffline(
     size: finalSize,
     downloadedAt: new Date().toISOString(),
   };
+}
+
+export async function exportToAndroidDownloadsIfPermitted(
+  book: Book,
+  localUri: string,
+  sizeBytes: number,
+  ext: string
+): Promise<boolean> {
+  if (Platform.OS !== 'android') return false;
+  // Guard against Base64 memory spikes on huge PDFs
+  if (sizeBytes > 25 * 1024 * 1024) return false;
+  try {
+    let dirUri = await AsyncStorage.getItem(STORAGE_DOWNLOADS_DIR_URI_KEY);
+    if (!dirUri) {
+      const initialUri = FileSystem.StorageAccessFramework.getUriForDirectoryInRoot('Download');
+      const perm = await FileSystem.StorageAccessFramework.requestDirectoryPermissionsAsync(initialUri);
+      if (!perm.granted || !perm.directoryUri) return false;
+      dirUri = perm.directoryUri;
+      await AsyncStorage.setItem(STORAGE_DOWNLOADS_DIR_URI_KEY, dirUri);
+    }
+    const safeName = (book.title || book.id)
+      .replace(/[\\/:*?"<>|]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 80);
+    const mime = MIME_BY_FMT[book.fmt.toUpperCase()] || 'application/octet-stream';
+    const b64 = await FileSystem.readAsStringAsync(localUri, {
+      encoding: FileSystem.EncodingType.Base64,
+    });
+    const destUri = await FileSystem.StorageAccessFramework.createFileAsync(
+      dirUri,
+      `${safeName}.${ext}`,
+      mime
+    );
+    await FileSystem.writeAsStringAsync(destUri, b64, {
+      encoding: FileSystem.EncodingType.Base64,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function downloadBookToCacheForReader(book: Book): Promise<string> {
+  const cacheBase = FileSystem.cacheDirectory ?? BASE_DIR;
+  if (!cacheBase) throw new Error('Cache directory unavailable');
+  const ext = (book.fmt || 'epub').toLowerCase().replace(/[^a-z0-9]/g, '') || 'epub';
+  const target = `${cacheBase}reader_${book.id}.${ext}`;
+  const existing = await FileSystem.getInfoAsync(target);
+  if (existing.exists && (existing.size ?? 0) > 512) {
+    return target;
+  }
+
+  const urls = [
+    `https://drive.google.com/uc?export=download&id=${encodeURIComponent(book.id)}`,
+    `https://drive.usercontent.google.com/download?id=${encodeURIComponent(book.id)}&export=download&confirm=t`,
+  ];
+  let lastErr: Error | null = null;
+  for (const url of urls) {
+    try {
+      const res = await FileSystem.downloadAsync(url, target);
+      if (!res || res.status >= 400) throw new Error(`HTTP ${res?.status ?? 'error'}`);
+      const ctype = (res.headers?.['content-type'] || res.headers?.['Content-Type'] || '').toLowerCase();
+      if (ctype.includes('text/html')) {
+        await FileSystem.deleteAsync(target, { idempotent: true });
+        lastErr = new Error('Drive returned HTML interstitial');
+        continue;
+      }
+      const info = await FileSystem.getInfoAsync(target);
+      if (!info.exists || (info.size ?? 0) < 512) {
+        await FileSystem.deleteAsync(target, { idempotent: true });
+        throw new Error('Empty file');
+      }
+      return target;
+    } catch (err) {
+      lastErr = err instanceof Error ? err : new Error(String(err));
+    }
+  }
+  throw lastErr || new Error('Unable to load eBook');
 }
 
 export async function removeOfflineBook(entry: OfflineBookEntry): Promise<void> {

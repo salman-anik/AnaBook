@@ -27,10 +27,12 @@ import { useAppTheme } from '../context/ThemeContext';
 import { formatBytes } from '../services/libraryStore';
 import type { Book, OfflineBookEntry } from '../types';
 import { useHorizontalScrollLock } from '../utils/horizontalScrollLock';
+import { buildQueryTermGroups, matchesTermGroups, scoreBookForQuery } from '../utils/smartSearch';
 
 type SearchScope = 'all' | 'books' | 'authors' | 'categories';
 
-const BOOK_PAGE_SIZE = 42;
+const BOOK_PAGE_SIZE = 30;
+const MAX_BOOK_RESULTS = 240;
 
 interface AuthorIndexItem {
   key: string;
@@ -92,13 +94,19 @@ export const SearchScreen = React.memo(function SearchScreen({
   const { theme, fs } = useAppTheme();
   const hLockProps = useHorizontalScrollLock(onHorizontalTouchLock);
   const [query, setQuery] = useState('');
+  const [debouncedQuery, setDebouncedQuery] = useState('');
   const [scope, setScope] = useState<SearchScope>('all');
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('list');
   const [visibleBookCount, setVisibleBookCount] = useState(BOOK_PAGE_SIZE);
 
   useEffect(() => {
+    const t = setTimeout(() => setDebouncedQuery(query), 150);
+    return () => clearTimeout(t);
+  }, [query]);
+
+  useEffect(() => {
     setVisibleBookCount(BOOK_PAGE_SIZE);
-  }, [query, scope]);
+  }, [debouncedQuery, scope]);
 
   const savedSet = useMemo(() => new Set(savedIds), [savedIds]);
 
@@ -136,7 +144,7 @@ export const SearchScreen = React.memo(function SearchScreen({
 
       if (b.sub) {
         const parts = b.sub.split('/').filter(Boolean);
-        for (let i = 0; i < Math.min(parts.length, 2); i++) {
+        for (let i = 0; i < parts.length; i++) {
           const subSlice = parts.slice(0, i + 1);
           const subKey = `${cat}/${subSlice.join('/')}`;
           const existingSub = catMap.get(subKey);
@@ -146,7 +154,7 @@ export const SearchScreen = React.memo(function SearchScreen({
             catMap.set(subKey, {
               key: subKey,
               label: subSlice[subSlice.length - 1],
-              parentLabel: i === 0 ? cat : `${cat} › ${subSlice[0]}`,
+              parentLabel: i === 0 ? cat : `${cat} › ${subSlice.slice(0, -1).join(' › ')}`,
               path: cat ? [cat, ...subSlice] : subSlice,
               count: 1,
             });
@@ -190,11 +198,10 @@ export const SearchScreen = React.memo(function SearchScreen({
             path: dedicatedPath || (b.cat ? [b.cat, ...(b.sub ? b.sub.split('/').filter(Boolean).slice(0, 1) : [])] : []),
             groupLabel,
             count: 1,
-            offlineCount: offlineById[b.id] ? 1 : 0,
+            offlineCount: 0,
           });
         } else {
           acc.count += 1;
-          if (offlineById[b.id]) acc.offlineCount += 1;
           if (dedicatedPath && !acc.hasDedicatedFolder) {
             acc.name = resolvedAuthor;
             acc.hasDedicatedFolder = true;
@@ -238,63 +245,46 @@ export const SearchScreen = React.memo(function SearchScreen({
       .sort((a, b) => b.count - a.count);
 
     return { authorIndex: authorsList, categoryIndex: catsList, seriesIndex: seriesList };
-  }, [books, categories, offlineById]);
+  }, [books, categories]);
 
-  const tokens = useMemo(
-    () =>
-      query
-        .trim()
-        .toLowerCase()
-        .split(/\s+/)
-        .filter(Boolean),
-    [query]
-  );
-
-  const hasQuery = tokens.length > 0;
+  const termGroups = useMemo(() => buildQueryTermGroups(debouncedQuery), [debouncedQuery]);
+  const hasQuery = termGroups.length > 0;
 
   const matchedAuthors = useMemo(() => {
-    if (!hasQuery) return authorIndex.slice(0, 20);
+    if (!hasQuery) return authorIndex.slice(0, 14);
     return authorIndex
-      .filter((a) => {
-        const hay = `${a.name} ${a.groupLabel}`.toLowerCase();
-        return tokens.every((t) => hay.includes(t));
-      })
-      .slice(0, scope === 'authors' ? 80 : 18);
-  }, [authorIndex, hasQuery, tokens, scope]);
+      .filter((a) => matchesTermGroups(`${a.name} ${a.groupLabel}`.toLowerCase(), termGroups))
+      .slice(0, scope === 'authors' ? 60 : 14);
+  }, [authorIndex, hasQuery, termGroups, scope]);
 
   const matchedCategories = useMemo(() => {
     if (!hasQuery) {
       return categoryIndex.filter((c) => c.path.length === 1);
     }
     return categoryIndex
-      .filter((c) => {
-        const hay = `${c.label} ${c.parentLabel}`.toLowerCase();
-        return tokens.every((t) => hay.includes(t));
-      })
-      .slice(0, scope === 'categories' ? 80 : 18);
-  }, [categoryIndex, hasQuery, tokens, scope]);
+      .filter((c) => matchesTermGroups(`${c.label} ${c.parentLabel}`.toLowerCase(), termGroups))
+      .slice(0, scope === 'categories' ? 60 : 18);
+  }, [categoryIndex, hasQuery, termGroups, scope]);
 
   const matchedSeries = useMemo(() => {
-    if (!hasQuery) return seriesIndex.slice(0, 14);
+    if (!hasQuery) return seriesIndex.slice(0, 10);
     return seriesIndex
-      .filter((s) => {
-        const hay = s.name.toLowerCase();
-        return tokens.every((t) => hay.includes(t));
-      })
-      .slice(0, 12);
-  }, [seriesIndex, hasQuery, tokens]);
+      .filter((s) => matchesTermGroups(s.name.toLowerCase(), termGroups))
+      .slice(0, 10);
+  }, [seriesIndex, hasQuery, termGroups]);
 
   const matchedBooks = useMemo(() => {
     if (!hasQuery) return [];
-    const results: Book[] = [];
+    const scored: { book: Book; score: number }[] = [];
     for (const b of books) {
-      const hay = b.searchBlob;
-      if (tokens.every((t) => hay.includes(t))) {
-        results.push(b);
+      const s = scoreBookForQuery(b, debouncedQuery, termGroups);
+      if (s > 0) {
+        scored.push({ book: b, score: s });
       }
     }
-    return results;
-  }, [books, hasQuery, tokens]);
+    scored.sort((a, b) => b.score - a.score);
+    return scored.slice(0, MAX_BOOK_RESULTS).map((x) => x.book);
+  }, [books, hasQuery, debouncedQuery, termGroups]);
 
   const visibleBooks = useMemo(
     () => matchedBooks.slice(0, visibleBookCount),
@@ -319,6 +309,17 @@ export const SearchScreen = React.memo(function SearchScreen({
     [onSelectPath]
   );
 
+  const QUICK_FIND_TAGS = [
+    'উপন্যাস',
+    'হুমায়ূন আহমেদ',
+    'Class 5',
+    'রবীন্দ্রনাথ',
+    'কবিতা',
+    'Islamic',
+    'EPUB',
+    'তিন গোয়েন্দা',
+  ];
+
   const renderDiscoveryEmptyState = () => (
     <ScrollView
       contentContainerStyle={styles.discoveryContent}
@@ -326,33 +327,27 @@ export const SearchScreen = React.memo(function SearchScreen({
       keyboardShouldPersistTaps="handled"
     >
       <Text style={[styles.sectionEyebrow, { color: theme.accent, fontSize: fs(10.5) }]}>
-        FEATURED AUTHORS ({authorIndex.length.toLocaleString()})
+        QUICK FIND (BANGLA & ENGLISH)
       </Text>
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        contentContainerStyle={styles.authorHorizontalRow}
-        {...hLockProps}
-      >
-        {matchedAuthors.map((author) => (
+      <View style={styles.seriesWrap}>
+        {QUICK_FIND_TAGS.map((tag) => (
           <TouchableOpacity
-            key={author.key}
-            style={[styles.authorChipCard, { backgroundColor: theme.surface, borderColor: theme.border }]}
-            onPress={() => handleOpenAuthor(author)}
+            key={tag}
+            style={[styles.seriesPill, { backgroundColor: theme.surface, borderColor: theme.border }]}
+            onPress={() => {
+              setQuery(tag);
+              setDebouncedQuery(tag);
+              setScope('all');
+            }}
             activeOpacity={0.85}
           >
-            <AuthorAvatar name={author.name} size={50} />
-            <Text style={[styles.authorChipName, { color: theme.ink, fontSize: fs(12) }]} numberOfLines={2}>
-              {author.name}
-            </Text>
-            <Text style={[styles.authorChipCount, { color: theme.accent, fontSize: fs(10.5) }]}>
-              {author.count.toLocaleString()} {author.count === 1 ? 'book' : 'books'}
-            </Text>
+            <SearchIcon size={12} color={theme.accent} />
+            <Text style={[styles.seriesPillText, { color: theme.ink, fontSize: fs(12) }]}>{tag}</Text>
           </TouchableOpacity>
         ))}
-      </ScrollView>
+      </View>
 
-      <Text style={[styles.sectionEyebrow, { color: theme.accent, fontSize: fs(10.5), marginTop: 18 }]}>
+      <Text style={[styles.sectionEyebrow, { color: theme.accent, fontSize: fs(10.5), marginTop: 20 }]}>
         CATEGORIES ({matchedCategories.length.toLocaleString()})
       </Text>
       <View style={styles.catGrid}>
@@ -376,35 +371,6 @@ export const SearchScreen = React.memo(function SearchScreen({
           </TouchableOpacity>
         ))}
       </View>
-
-      {matchedSeries.length > 0 ? (
-        <>
-          <Text style={[styles.sectionEyebrow, { color: theme.accent, fontSize: fs(10.5), marginTop: 18 }]}>
-            POPULAR SERIES & COLLECTIONS
-          </Text>
-          <View style={styles.seriesWrap}>
-            {matchedSeries.map((ser) => (
-              <TouchableOpacity
-                key={ser.name}
-                style={[styles.seriesPill, { backgroundColor: theme.surfaceAlt, borderColor: theme.border }]}
-                onPress={() => {
-                  setQuery(ser.name);
-                  setScope('all');
-                }}
-                activeOpacity={0.85}
-              >
-                <LayersIcon size={13} color={theme.accent} />
-                <Text style={[styles.seriesPillText, { color: theme.ink, fontSize: fs(11.5) }]} numberOfLines={1}>
-                  {ser.name}
-                </Text>
-                <Text style={[styles.seriesPillCount, { color: theme.muted, fontSize: fs(10.5) }]}>
-                  {ser.count}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        </>
-      ) : null}
     </ScrollView>
   );
 
@@ -599,78 +565,73 @@ export const SearchScreen = React.memo(function SearchScreen({
   return (
     <View style={[styles.container, { backgroundColor: theme.bg }]}>
       <View style={[styles.topBar, { borderBottomColor: theme.borderSubtle }]}>
-        <View style={styles.titleRow}>
-          <View style={styles.titleCol}>
-            <Text style={[styles.headerTitle, { color: theme.ink, fontSize: fs(21) }]}>Search</Text>
-            <Text style={[styles.headerSub, { color: theme.muted, fontSize: fs(11.5) }]}>
-              Books, authors, categories, series & formats
-            </Text>
-          </View>
-
-          {hasQuery && (scope === 'all' || scope === 'books') ? (
-            <TouchableOpacity
-              style={[styles.togglePill, { backgroundColor: theme.surface, borderColor: theme.border }]}
-              onPress={() => setViewMode((m) => (m === 'grid' ? 'list' : 'grid'))}
-            >
-              <Text style={[styles.togglePillText, { color: theme.ink, fontSize: fs(11.5) }]}>
-                {viewMode === 'grid' ? 'List View' : 'Grid View'}
-              </Text>
-            </TouchableOpacity>
-          ) : null}
-        </View>
-
         <View style={[styles.searchBox, { backgroundColor: theme.surfaceAlt, borderColor: theme.border }]}>
-          <SearchIcon size={17} color={theme.muted} />
+          <SearchIcon size={18} color={theme.accent} />
           <TextInput
             value={query}
             onChangeText={setQuery}
-            placeholder="Search book title, author, category, series…"
+            placeholder="Search books, authors, class 5, uponnas…"
             placeholderTextColor={theme.muted}
-            style={[styles.searchInput, { color: theme.ink, fontSize: fs(13.5) }]}
+            style={[styles.searchInput, { color: theme.ink, fontSize: fs(14) }]}
             returnKeyType="search"
             autoCapitalize="none"
             autoCorrect={false}
           />
           {query.length > 0 ? (
-            <TouchableOpacity onPress={() => setQuery('')} hitSlop={8} accessibilityLabel="Clear search">
+            <TouchableOpacity onPress={() => { setQuery(''); setDebouncedQuery(''); }} hitSlop={8} accessibilityLabel="Clear search">
               <CloseIcon size={16} color={theme.muted} />
             </TouchableOpacity>
           ) : null}
         </View>
 
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.scopeRow}
-          keyboardShouldPersistTaps="handled"
-        >
-          {SCOPE_OPTIONS.map((opt) => {
-            const active = scope === opt.key;
-            return (
+        {hasQuery ? (
+          <View style={styles.activeSearchControls}>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.scopeRow}
+              keyboardShouldPersistTaps="handled"
+            >
+              {SCOPE_OPTIONS.map((opt) => {
+                const active = scope === opt.key;
+                return (
+                  <TouchableOpacity
+                    key={opt.key}
+                    style={[
+                      styles.scopeChip,
+                      {
+                        backgroundColor: active ? theme.accentSoft : theme.surfaceAlt,
+                        borderColor: active ? theme.accent : theme.borderSubtle,
+                      },
+                    ]}
+                    onPress={() => setScope(opt.key)}
+                    activeOpacity={0.85}
+                  >
+                    <Text
+                      style={[
+                        styles.scopeChipText,
+                        { color: active ? theme.accent : theme.muted, fontSize: fs(12) },
+                      ]}
+                    >
+                      {opt.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+
+            {scope === 'all' || scope === 'books' ? (
               <TouchableOpacity
-                key={opt.key}
-                style={[
-                  styles.scopeChip,
-                  {
-                    backgroundColor: active ? theme.accentSoft : theme.surfaceAlt,
-                    borderColor: active ? theme.accent : theme.borderSubtle,
-                  },
-                ]}
-                onPress={() => setScope(opt.key)}
-                activeOpacity={0.85}
+                style={[styles.togglePill, { backgroundColor: theme.surface, borderColor: theme.border }]}
+                onPress={() => setViewMode((m) => (m === 'grid' ? 'list' : 'grid'))}
               >
-                <Text
-                  style={[
-                    styles.scopeChipText,
-                    { color: active ? theme.accent : theme.muted, fontSize: fs(12) },
-                  ]}
-                >
-                  {opt.label}
+                <Text style={[styles.togglePillText, { color: theme.ink, fontSize: fs(11) }]}>
+                  {viewMode === 'grid' ? 'List' : 'Grid'}
                 </Text>
               </TouchableOpacity>
-            );
-          })}
-        </ScrollView>
+            ) : null}
+          </View>
+        ) : null}
       </View>
 
       {scope === 'authors' ? (
@@ -876,6 +837,12 @@ const styles = StyleSheet.create({
   },
   scopeRow: {
     flexDirection: 'row',
+    gap: 8,
+  },
+  activeSearchControls: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
     gap: 8,
     paddingTop: 10,
   },

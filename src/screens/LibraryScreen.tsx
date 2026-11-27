@@ -25,6 +25,7 @@ import {
 import { useAppTheme } from '../context/ThemeContext';
 import { formatBytes } from '../services/libraryStore';
 import type { Book, BookProgress, OfflineBookEntry } from '../types';
+import { buildQueryTermGroups, matchesTermGroups } from '../utils/smartSearch';
 
 type ShelfTabKey = 'reading' | 'saved';
 
@@ -247,8 +248,9 @@ export const LibraryScreen = React.memo(function LibraryScreen({
 
   const searchResults = useMemo(() => {
     if (!isSearchMode) return [];
-    const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
-    return books.filter((b) => {
+    const groups = buildQueryTermGroups(query);
+    const out: Book[] = [];
+    for (const b of books) {
       if (catFilter || subFilter) {
         const paths = [{ cat: b.cat, sub: b.sub }, ...(b.extraPaths || [])];
         const matchesPath = paths.some((p) => {
@@ -256,13 +258,13 @@ export const LibraryScreen = React.memo(function LibraryScreen({
           if (subFilter && p.sub !== subFilter && !p.sub.startsWith(subFilter + '/')) return false;
           return true;
         });
-        if (!matchesPath) return false;
+        if (!matchesPath) continue;
       }
-      for (const t of terms) {
-        if (!b.searchBlob.includes(t)) return false;
-      }
-      return true;
-    });
+      if (groups.length > 0 && !matchesTermGroups(b.searchBlob, groups)) continue;
+      out.push(b);
+      if (out.length >= 250) break;
+    }
+    return out;
   }, [isSearchMode, books, query, catFilter, subFilter]);
 
   const clearSearchMode = () => {

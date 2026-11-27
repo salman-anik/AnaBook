@@ -1,7 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { Image, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
-import { AuthorAvatar } from '../components/AuthorAvatar';
 import { BookCover } from '../components/BookCover';
 import {
   BookOpenIcon,
@@ -10,13 +9,11 @@ import {
   DownloadIcon,
   FlameIcon,
   OfflineIcon,
-  SparklesIcon,
 } from '../components/Icons';
 import { useAppTheme } from '../context/ThemeContext';
-import { formatBytes } from '../services/libraryStore';
 import { QUOTES } from '../theme';
 import type { Book, BookProgress, OfflineBookEntry, ReadingStreak } from '../types';
-import { useHorizontalScrollLock } from '../utils/horizontalScrollLock';
+import { hasGoodBookTitle, hasGoodCover, isUponnasOrFamous } from '../utils/smartSearch';
 
 interface Props {
   books: Book[];
@@ -55,7 +52,6 @@ export const HomeScreen = React.memo(function HomeScreen({
 }: Props) {
   const { theme, fs } = useAppTheme();
   const [quoteIdx, setQuoteIdx] = useState(0);
-  const hLockProps = useHorizontalScrollLock(onHorizontalTouchLock);
 
   const dateLabel = useMemo(() => {
     try {
@@ -77,123 +73,33 @@ export const HomeScreen = React.memo(function HomeScreen({
   const featuredDlPct = featuredBook ? downloadingMap[featuredBook.id] : undefined;
   const featuredPct = featuredProg?.progressPct ?? (featuredOffline ? 100 : 0);
 
-  // Personalized "Suggested For You" recommendations from reading history & bookmarks
-  const suggestedBooks = useMemo(() => {
-    if (!books.length) return [] as { book: Book; reason: string }[];
-    const byId = new Map(books.map((b) => [b.id, b]));
-    const seedIds = new Set<string>([
-      ...(featuredBook ? [featuredBook.id] : []),
-      ...savedIds,
-      ...Object.keys(offlineById),
-      ...Object.keys(progressById),
-    ]);
-
-    const prefAuthors = new Map<string, number>();
-    const prefSubs = new Map<string, number>();
-    const prefCats = new Map<string, number>();
-
-    for (const id of seedIds) {
-      const sb = byId.get(id);
-      if (!sb) continue;
-      if (sb.author && sb.author !== 'Unknown') {
-        prefAuthors.set(sb.author, (prefAuthors.get(sb.author) || 0) + 4);
-      }
-      if (sb.sub) {
-        prefSubs.set(sb.sub, (prefSubs.get(sb.sub) || 0) + 3);
-      }
-      prefCats.set(sb.cat, (prefCats.get(sb.cat) || 0) + 1);
-    }
-
-    const candidates: { book: Book; score: number; reason: string }[] = [];
-    const seenCatMix = new Map<string, number>();
-
-    for (const b of books) {
-      if (featuredBook && b.id === featuredBook.id) continue;
-      if (progressById[b.id] && progressById[b.id].progressPct >= 100) continue;
-
-      let score = b.coverId ? 3 : 0;
-      let reason = (b.sub || b.cat).split('/').pop() || b.cat;
-
-      if (prefAuthors.has(b.author)) {
-        score += (prefAuthors.get(b.author) || 0) * 3;
-        reason = b.author;
-      } else if (b.sub && prefSubs.has(b.sub)) {
-        score += (prefSubs.get(b.sub) || 0) * 2;
-      } else if (prefCats.has(b.cat)) {
-        score += prefCats.get(b.cat) || 0;
-      }
-
-      if (score > 2) {
-        candidates.push({ book: b, score, reason });
-      }
-      if (candidates.length >= 250) break;
-    }
-
-    candidates.sort((a, b) => b.score - a.score);
-    const out: { book: Book; reason: string }[] = [];
-    const used = new Set<string>();
-
-    for (const c of candidates) {
-      const catCnt = seenCatMix.get(c.book.cat) || 0;
-      if (out.length < 10 && !used.has(c.book.id) && (prefAuthors.size > 0 || catCnt < 3)) {
-        used.add(c.book.id);
-        seenCatMix.set(c.book.cat, catCnt + 1);
-        out.push({ book: c.book, reason: c.reason });
-      }
-      if (out.length >= 10) break;
-    }
-
-    if (out.length < 10) {
-      for (const b of books) {
-        if (!used.has(b.id) && b.coverId && (!featuredBook || b.id !== featuredBook.id)) {
-          used.add(b.id);
-          out.push({ book: b, reason: (b.sub || b.cat).split('/').pop() || b.cat });
-        }
-        if (out.length >= 10) break;
-      }
-    }
-    return out;
-  }, [books, featuredBook, savedIds, offlineById, progressById]);
-
-  const shelfBooks = useMemo(() => {
+  // Curated Discover: Uponnas & Famous books only, with good covers and clean titles
+  const discoverBooks = useMemo(() => {
     const picked: Book[] = [];
     const seen = new Set<string>(featuredBook ? [featuredBook.id] : []);
-    const byId = new Map(books.map((b) => [b.id, b]));
-    for (const id of [...Object.keys(offlineById), ...savedIds, ...Object.keys(progressById)]) {
-      const b = byId.get(id);
-      if (b && !seen.has(b.id)) {
+
+    for (const b of books) {
+      if (seen.has(b.id)) continue;
+      if (!hasGoodCover(b) || !hasGoodBookTitle(b.title)) continue;
+      if (isUponnasOrFamous(b)) {
         seen.add(b.id);
         picked.push(b);
       }
-      if (picked.length >= 12) break;
+      if (picked.length >= 9) break;
     }
-    if (picked.length < 12) {
+
+    if (picked.length < 9) {
       for (const b of books) {
-        if (!seen.has(b.id) && b.coverId) {
+        if (seen.has(b.id)) continue;
+        if (hasGoodCover(b) && hasGoodBookTitle(b.title)) {
           seen.add(b.id);
           picked.push(b);
         }
-        if (picked.length >= 12) break;
+        if (picked.length >= 9) break;
       }
     }
     return picked;
-  }, [books, featuredBook, offlineById, savedIds, progressById]);
-
-  const popularAuthors = useMemo(() => {
-    const map = new Map<string, { name: string; group: string; count: number }>();
-    for (const b of books) {
-      if (b.cat !== 'Authors & Scholars' || !b.sub) continue;
-      const parts = b.sub.split('/').filter(Boolean);
-      if (parts.length < 2) continue;
-      const group = parts[0];
-      const name = parts[1];
-      const key = `${group}/${name}`;
-      const existing = map.get(key);
-      if (existing) existing.count++;
-      else map.set(key, { name, group, count: 1 });
-    }
-    return [...map.values()].sort((a, b) => b.count - a.count).slice(0, 14);
-  }, [books]);
+  }, [books, featuredBook]);
 
   const quote = QUOTES[quoteIdx % QUOTES.length];
 
@@ -321,110 +227,19 @@ export const HomeScreen = React.memo(function HomeScreen({
         </View>
       ) : null}
 
-      {/* Personalized "Suggested For You" Section */}
-      {suggestedBooks.length > 0 ? (
-        <View style={styles.sectionBlock}>
-          <View style={styles.sectionHead}>
-            <View style={styles.titleWithIcon}>
-              <SparklesIcon size={16} color={theme.accent} />
-              <Text style={[styles.sectionTitle, { color: theme.ink, fontSize: fs(17) }]}>Suggested For You</Text>
-            </View>
-            <TouchableOpacity style={styles.moreLinkBtn} onPress={() => onExplorePath([])}>
-              <Text style={[styles.sectionAction, { color: theme.accent, fontSize: fs(12) }]}>Explore</Text>
-              <ChevronRightIcon size={15} color={theme.accent} />
-            </TouchableOpacity>
-          </View>
-
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.recScroll}
-            {...hLockProps}
-          >
-            {suggestedBooks.map(({ book, reason }) => {
-              const offline = offlineById[book.id];
-              return (
-                <TouchableOpacity
-                  key={book.id}
-                  style={[styles.recCard, { backgroundColor: theme.surfaceAlt, borderColor: theme.border }]}
-                  onPress={() => onOpenBookDetail(book)}
-                  activeOpacity={0.85}
-                >
-                  <BookCover
-                    book={book}
-                    localCoverUri={offline?.coverLocalUri}
-                    width={106}
-                    height={154}
-                    borderRadius={10}
-                    isOffline={Boolean(offline)}
-                  />
-                  <View style={[styles.reasonPill, { backgroundColor: theme.accentSoft }]}>
-                    <Text style={[styles.reasonText, { color: theme.accent, fontSize: fs(10) }]} numberOfLines={1}>
-                      {reason}
-                    </Text>
-                  </View>
-                  <Text style={[styles.recTitle, { color: theme.ink, fontSize: fs(12) }]} numberOfLines={2}>
-                    {book.title}
-                  </Text>
-                  <Text style={[styles.recAuthor, { color: theme.muted, fontSize: fs(10.5) }]} numberOfLines={1}>
-                    {book.author}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
-          </ScrollView>
-        </View>
-      ) : null}
-
-      {/* Popular Authors Portrait Strip */}
-      {popularAuthors.length > 0 ? (
-        <View style={styles.sectionBlock}>
-          <View style={styles.sectionHead}>
-            <Text style={[styles.sectionTitle, { color: theme.ink, fontSize: fs(17) }]}>Popular Authors</Text>
-            <TouchableOpacity style={styles.moreLinkBtn} onPress={() => onExplorePath(['Authors & Scholars'])}>
-              <Text style={[styles.sectionAction, { color: theme.accent, fontSize: fs(12) }]}>All</Text>
-              <ChevronRightIcon size={15} color={theme.accent} />
-            </TouchableOpacity>
-          </View>
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.authorsScroll}
-            {...hLockProps}
-          >
-            {popularAuthors.map((au) => (
-              <TouchableOpacity
-                key={`${au.group}-${au.name}`}
-                style={styles.authorItem}
-                onPress={() => onExplorePath(['Authors & Scholars', au.group, au.name])}
-                activeOpacity={0.82}
-              >
-                <AuthorAvatar name={au.name} size={56} />
-                <Text style={[styles.authorChipName, { color: theme.ink, fontSize: fs(11) }]} numberOfLines={2}>
-                  {au.name}
-                </Text>
-                <Text style={[styles.authorChipCount, { color: theme.accent, fontSize: fs(10) }]}>
-                  {au.count} books
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
-        </View>
-      ) : null}
-
-      {/* Discover & Offline 3-Column Visual Bookshelf Grid */}
+      {/* Curated Discover: Uponnas & Famous Books with Good Covers */}
       <View style={styles.sectionBlock}>
         <View style={styles.sectionHead}>
           <Text style={[styles.sectionTitle, { color: theme.ink, fontSize: fs(17) }]}>
-            {offlineCount > 0 ? 'Offline & Recent' : 'Discover'}
+            Discover Novels & Classics
           </Text>
-          <TouchableOpacity style={styles.moreLinkBtn} onPress={onBrowseLibrary}>
-            <Text style={[styles.sectionAction, { color: theme.accent, fontSize: fs(12) }]}>Shelf</Text>
+          <TouchableOpacity style={styles.moreLinkBtn} onPress={() => onExplorePath(['Bangla Books'])}>
+            <Text style={[styles.sectionAction, { color: theme.accent, fontSize: fs(12) }]}>Explore</Text>
             <ChevronRightIcon size={15} color={theme.accent} />
           </TouchableOpacity>
         </View>
         <View style={styles.discoverGrid}>
-          {shelfBooks.slice(0, 9).map((item) => {
+          {discoverBooks.map((item) => {
             const offline = offlineById[item.id];
             return (
               <TouchableOpacity

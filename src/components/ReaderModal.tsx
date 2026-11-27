@@ -15,7 +15,9 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { WebView, type WebViewMessageEvent } from 'react-native-webview';
 
 import { useAppTheme } from '../context/ThemeContext';
+import { downloadBookToCacheForReader } from '../services/libraryStore';
 import type { Book, OfflineBookEntry } from '../types';
+import { buildEbookReaderHtml } from '../utils/ebookReaderHtml';
 import {
   BookOpenIcon,
   CloseIcon,
@@ -30,6 +32,7 @@ interface Props {
   downloadingPct: number | null;
   onClose: () => void;
   onMakeOffline: (book: Book) => void;
+  onCancelDownload?: (bookId: string) => void;
   onOpenOfflineExternal: (book: Book, entry: OfflineBookEntry) => void;
 }
 
@@ -39,10 +42,13 @@ export function ReaderModal({
   downloadingPct,
   onClose,
   onMakeOffline,
+  onCancelDownload,
   onOpenOfflineExternal,
 }: Props) {
-  const { theme, fs } = useAppTheme();
+  const { theme, mode, fs } = useAppTheme();
   const [offlineText, setOfflineText] = useState<string | null>(null);
+  const [ebookHtml, setEbookHtml] = useState<string | null>(null);
+  const [ebookError, setEbookError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [locked, setLocked] = useState(false);
   const [scrollPct, setScrollPct] = useState(0);
@@ -54,26 +60,63 @@ export function ReaderModal({
   const textContentHeightRef = useRef(1);
   const textViewHeightRef = useRef(1);
 
-  const isImage = book ? ['JPG', 'JPEG', 'PNG'].includes(book.fmt.toUpperCase()) : false;
-  const isText = book ? ['TXT', 'MD'].includes(book.fmt.toUpperCase()) : false;
+  const upperFmt = book ? book.fmt.toUpperCase() : '';
+  const isImage = ['JPG', 'JPEG', 'PNG'].includes(upperFmt);
+  const isText = ['TXT', 'MD'].includes(upperFmt);
+  const isEbook = upperFmt === 'EPUB' || upperFmt === 'MOBI';
 
   useEffect(() => {
+    let active = true;
     setOfflineText(null);
+    setEbookHtml(null);
+    setEbookError(null);
     setLoading(true);
     setLocked(false);
     setScrollPct(0);
-    if (book && offlineEntry && isText) {
+
+    if (!book) return;
+
+    if (offlineEntry && isText) {
       FileSystem.readAsStringAsync(offlineEntry.localUri)
         .then((txt) => {
+          if (!active) return;
           setOfflineText(txt);
           setLoading(false);
         })
         .catch(() => {
+          if (!active) return;
           setOfflineText('Unable to read local text file.');
           setLoading(false);
         });
+    } else if (isEbook) {
+      (async () => {
+        try {
+          const uri = offlineEntry?.localUri || (await downloadBookToCacheForReader(book));
+          if (!active) return;
+          const b64 = await FileSystem.readAsStringAsync(uri, {
+            encoding: FileSystem.EncodingType.Base64,
+          });
+          if (!active) return;
+          const html = buildEbookReaderHtml({
+            format: upperFmt as 'EPUB' | 'MOBI',
+            base64Data: b64,
+            title: book.title,
+            initialTheme: mode === 'dark' ? 'dark' : 'light',
+          });
+          setEbookHtml(html);
+          setLoading(false);
+        } catch (err) {
+          if (!active) return;
+          setEbookError(err instanceof Error ? err.message : 'Unable to load eBook');
+          setLoading(false);
+        }
+      })();
     }
-  }, [book?.id, offlineEntry?.localUri, isText]);
+
+    return () => {
+      active = false;
+    };
+  }, [book?.id, offlineEntry?.localUri, isText, isEbook, upperFmt, mode]);
 
   // Inject mistouch guard whenever lock toggles inside WebView
   useEffect(() => {
@@ -207,9 +250,13 @@ export function ReaderModal({
                 <BookOpenIcon size={16} color={theme.creamInk} />
               </TouchableOpacity>
             ) : downloadingPct !== null ? (
-              <View style={[styles.iconBtn, { backgroundColor: theme.surface, borderColor: theme.accent }]}>
-                <Text style={[styles.pctMini, { color: theme.accent }]}>{downloadingPct}%</Text>
-              </View>
+              <TouchableOpacity
+                style={[styles.iconBtn, { backgroundColor: theme.surface, borderColor: theme.danger }]}
+                onPress={() => onCancelDownload?.(book.id)}
+                accessibilityLabel="Cancel download"
+              >
+                <CloseIcon size={14} color={theme.danger} />
+              </TouchableOpacity>
             ) : (
               <TouchableOpacity
                 style={[styles.iconBtn, { backgroundColor: theme.accent, borderColor: theme.accent }]}
@@ -252,6 +299,36 @@ export function ReaderModal({
                 {offlineText}
               </Text>
             </ScrollView>
+          ) : isEbook ? (
+            ebookError ? (
+              <View style={[styles.spinnerOverlay, { backgroundColor: theme.bg, padding: 24 }]}>
+                <Text style={[styles.title, { color: theme.ink, textAlign: 'center', marginBottom: 8 }]}>
+                  Could not open {upperFmt}
+                </Text>
+                <Text style={{ color: theme.muted, textAlign: 'center', fontSize: 13 }}>
+                  {ebookError}
+                </Text>
+              </View>
+            ) : ebookHtml ? (
+              <WebView
+                ref={(el: unknown) => {
+                  webViewRef.current = el;
+                }}
+                originWhitelist={['*']}
+                source={{ html: ebookHtml }}
+                style={styles.webview}
+                onLoadEnd={(): void => setLoading(false)}
+                javaScriptEnabled
+                domStorageEnabled
+              />
+            ) : (
+              <View style={[styles.spinnerOverlay, { backgroundColor: theme.bg }]}>
+                <ActivityIndicator size="large" color={theme.accent} />
+                <Text style={{ color: theme.muted, marginTop: 12, fontSize: 13 }}>
+                  Loading {upperFmt} reader…
+                </Text>
+              </View>
+            )
           ) : (
             <>
               <WebView
@@ -284,7 +361,7 @@ export function ReaderModal({
           )}
 
           {/* Right-Side Fast Scrollbar Rail (Always active, even when locked!) */}
-          {showScrollRail ? (
+          {showScrollRail && !isEbook ? (
             <View
               style={styles.railWrap}
               onLayout={(e) => {
@@ -303,12 +380,6 @@ export function ReaderModal({
                   ]}
                 />
               </View>
-            </View>
-          ) : null}
-
-          {scrubbing ? (
-            <View style={[styles.scrubPill, { backgroundColor: theme.surfaceDeep, borderColor: theme.accent }]}>
-              <Text style={[styles.scrubText, { color: theme.ink }]}>{Math.round(scrollPct * 100)}%</Text>
             </View>
           ) : null}
 
